@@ -1,83 +1,120 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, Filter, Search, Download } from "lucide-react";
+import { Calendar, Filter, Search, Download, ChevronDown, RotateCw } from "lucide-react";
 import WorkoutCard from "@/components/WorkoutCard";
-
-interface Workout {
-  id: string;
-  exercise: string;
-  sets: number;
-  reps: number;
-  weight: number;
-  date: Date;
-}
-
-// Generate mock historical workout data
-const generateHistoricalWorkouts = () => {
-  const mockExercises = [
-    "Bench Press", "Squat", "Deadlift", "Pull Up", "Shoulder Press",
-    "Bicep Curl", "Tricep Extension", "Lat Pulldown", "Leg Press"
-  ];
-  
-  const workouts: Workout[] = [];
-  
-  // Create workouts for the past 14 days
-  for (let i = 14; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    
-    // Skip some days to make it realistic
-    if (i % 3 === 2) continue;
-    
-    // Add 1-3 workouts per day
-    const workoutsCount = Math.floor(Math.random() * 3) + 1;
-    
-    for (let j = 0; j < workoutsCount; j++) {
-      workouts.push({
-        id: `workout-${i}-${j}`,
-        exercise: mockExercises[Math.floor(Math.random() * mockExercises.length)],
-        sets: Math.floor(Math.random() * 5) + 1,
-        reps: Math.floor(Math.random() * 12) + 5,
-        weight: Math.floor(Math.random() * 100) + 10,
-        date: new Date(date)
-      });
-    }
-  }
-  
-  return workouts;
-};
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { 
+  loadWorkouts, 
+  getExerciseList, 
+  filterWorkouts, 
+  replicateDayWorkouts,
+  Workout
+} from "@/services/workoutService";
+import { format } from 'date-fns';
 
 export default function History() {
-  const [workouts] = useState<Workout[]>(generateHistoricalWorkouts());
+  const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
+  const [showAllData, setShowAllData] = useState(false);
+  const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
   
-  // Get unique exercises
-  const exercises = Array.from(new Set(workouts.map(w => w.exercise))).sort();
+  // Queries
+  const { data: exercises = [] } = useQuery({
+    queryKey: ['exercises'],
+    queryFn: getExerciseList
+  });
+
+  const { data: workouts = [], isLoading } = useQuery({
+    queryKey: ['workouts', showAllData],
+    queryFn: () => loadWorkouts(!showAllData)
+  });
+
+  // Mutations
+  const replicateWorkoutsMutation = useMutation({
+    mutationFn: replicateDayWorkouts,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workouts'] });
+    }
+  });
+
+  // Filter workouts based on searchTerm, selectedExercise, and dateRange
+  let filteredWorkouts = workouts;
   
+  // Apply exercise filter
+  if (selectedExercise) {
+    filteredWorkouts = filteredWorkouts.filter(w => w.exercise === selectedExercise);
+  }
+  
+  // Apply search filter
+  if (searchTerm) {
+    const searchLower = searchTerm.toLowerCase();
+    filteredWorkouts = filteredWorkouts.filter(w => 
+      w.exercise.toLowerCase().includes(searchLower)
+    );
+  }
+  
+  // Apply date filter
+  if (dateRange[0] && dateRange[1]) {
+    filteredWorkouts = filterWorkouts(
+      filteredWorkouts,
+      "All",
+      dateRange[0],
+      dateRange[1]
+    );
+  }
+
   // Group workouts by date
-  const groupedWorkouts = workouts
-    .filter(workout => {
-      const matchesSearch = workout.exercise.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesExercise = selectedExercise ? workout.exercise === selectedExercise : true;
-      return matchesSearch && matchesExercise;
-    })
-    .reduce((groups, workout) => {
-      const dateString = workout.date.toDateString();
-      
-      if (!groups[dateString]) {
-        groups[dateString] = [];
-      }
-      
-      groups[dateString].push(workout);
-      return groups;
-    }, {} as Record<string, Workout[]>);
+  const groupedWorkouts: Record<string, Workout[]> = {};
+  filteredWorkouts.forEach(workout => {
+    const dateString = workout.workout_date.split('T')[0]; // YYYY-MM-DD
+    if (!groupedWorkouts[dateString]) {
+      groupedWorkouts[dateString] = [];
+    }
+    groupedWorkouts[dateString].push(workout);
+  });
   
   // Sort dates in descending order
   const sortedDates = Object.keys(groupedWorkouts).sort((a, b) => 
     new Date(b).getTime() - new Date(a).getTime()
   );
+
+  // Handle replicating workouts from a specific day
+  const handleReplicateWorkouts = (sourceDate: string) => {
+    replicateWorkoutsMutation.mutate(new Date(sourceDate));
+  };
+
+  // Download workouts as CSV
+  const downloadWorkoutsCSV = () => {
+    if (filteredWorkouts.length === 0) return;
+    
+    // Format workouts for CSV
+    const headers = ['Date', 'Exercise', 'Sets', 'Reps', 'Weight (kg)'];
+    const csvRows = [headers.join(',')];
+    
+    filteredWorkouts.forEach(w => {
+      const row = [
+        w.workout_date,
+        `"${w.exercise}"`, // Quotes to handle commas in exercise names
+        w.sets,
+        w.reps,
+        w.weight
+      ];
+      csvRows.push(row.join(','));
+    });
+    
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'workout_history.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   return (
     <div className="container max-w-lg py-8 px-4 md:px-0">
@@ -96,32 +133,63 @@ export default function History() {
             />
           </div>
           
-          <div className="flex items-center gap-2 overflow-x-auto py-1 -mx-1 px-1 no-scrollbar">
-            <button
-              onClick={() => setSelectedExercise(null)}
-              className={`subtle-badge whitespace-nowrap ${
-                selectedExercise === null ? "bg-primary text-primary-foreground hover:bg-primary/90" : ""
-              }`}
-            >
-              All Exercises
-            </button>
+          <div className="flex items-center gap-4 mb-4">
+            <label className="flex items-center gap-2 text-sm">
+              <input 
+                type="checkbox" 
+                checked={showAllData} 
+                onChange={() => setShowAllData(!showAllData)}
+                className="rounded border-gray-300 text-primary focus:ring-primary"
+              />
+              Show all history
+            </label>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">Exercise</label>
+              <div className="relative">
+                <select
+                  className="workout-input pr-8 w-full"
+                  value={selectedExercise || ""}
+                  onChange={(e) => setSelectedExercise(e.target.value || null)}
+                >
+                  <option value="">All Exercises</option>
+                  {exercises.map(exercise => (
+                    <option key={exercise} value={exercise}>{exercise}</option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+              </div>
+            </div>
             
-            {exercises.map(exercise => (
-              <button
-                key={exercise}
-                onClick={() => setSelectedExercise(exercise)}
-                className={`subtle-badge whitespace-nowrap ${
-                  selectedExercise === exercise ? "bg-primary text-primary-foreground hover:bg-primary/90" : ""
-                }`}
-              >
-                {exercise}
-              </button>
-            ))}
+            <div>
+              <label className="block text-sm font-medium mb-1">Date Range</label>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="date"
+                  className="workout-input flex-1"
+                  value={dateRange[0] ? format(dateRange[0], 'yyyy-MM-dd') : ''}
+                  onChange={(e) => setDateRange([e.target.value ? new Date(e.target.value) : null, dateRange[1]])}
+                />
+                <span>to</span>
+                <input
+                  type="date"
+                  className="workout-input flex-1"
+                  value={dateRange[1] ? format(dateRange[1], 'yyyy-MM-dd') : ''}
+                  onChange={(e) => setDateRange([dateRange[0], e.target.value ? new Date(e.target.value) : null])}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      {sortedDates.length > 0 ? (
+      {isLoading ? (
+        <div className="flex justify-center py-8">
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full"></div>
+        </div>
+      ) : sortedDates.length > 0 ? (
         <AnimatePresence>
           <div className="space-y-8">
             {sortedDates.map((dateString, dateIndex) => (
@@ -131,29 +199,41 @@ export default function History() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.4, delay: dateIndex * 0.1 }}
               >
-                <div className="flex items-center gap-2 mb-3">
-                  <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center">
-                    <Calendar className="h-4 w-4 text-primary" />
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center">
+                      <Calendar className="h-4 w-4 text-primary" />
+                    </div>
+                    <h3 className="text-base font-medium">
+                      {new Date(dateString).toLocaleDateString('en-US', {
+                        weekday: 'long',
+                        month: 'short',
+                        day: 'numeric'
+                      })}
+                    </h3>
                   </div>
-                  <h3 className="text-base font-medium">
-                    {new Date(dateString).toLocaleDateString('en-US', {
-                      weekday: 'long',
-                      month: 'short',
-                      day: 'numeric'
-                    })}
-                  </h3>
+                  
+                  <button 
+                    onClick={() => handleReplicateWorkouts(dateString)}
+                    disabled={replicateWorkoutsMutation.isPending}
+                    className="flex items-center gap-1 text-xs rounded-full bg-primary/10 text-primary px-2 py-1 hover:bg-primary/20 transition-colors"
+                  >
+                    <RotateCw className="h-3 w-3" />
+                    <span>Replicate</span>
+                  </button>
                 </div>
                 
-                <div className="space-y-4">
+                <div className="rounded-lg border bg-card overflow-hidden">
                   {groupedWorkouts[dateString].map((workout, index) => (
-                    <WorkoutCard
-                      key={workout.id}
-                      exercise={workout.exercise}
-                      sets={workout.sets}
-                      reps={workout.reps}
-                      weight={workout.weight}
-                      animate={false}
-                    />
+                    <div key={workout.id} className={index > 0 ? "border-t" : ""}>
+                      <WorkoutCard
+                        exercise={workout.exercise}
+                        sets={workout.sets}
+                        reps={workout.reps}
+                        weight={workout.weight}
+                        animate={false}
+                      />
+                    </div>
                   ))}
                 </div>
               </motion.div>
@@ -172,7 +252,10 @@ export default function History() {
       
       {sortedDates.length > 0 && (
         <div className="mt-8 flex justify-center">
-          <button className="flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted">
+          <button 
+            onClick={downloadWorkoutsCSV}
+            className="flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
             <Download className="h-4 w-4" />
             Export History
           </button>
